@@ -64,6 +64,39 @@
       cursor: pointer;
     }
 
+    /* Botão de som discreto no canto superior */
+    #som {
+      position: fixed;
+      top: calc(12px + env(safe-area-inset-top));
+      right: calc(12px + env(safe-area-inset-right));
+      z-index: 10;
+      padding: 7px 12px;
+      border: 1px solid rgba(255, 70, 60, 0.35);
+      border-radius: 999px;
+      background: rgba(20, 0, 0, 0.55);
+      color: #f2c9c6;
+      font: 13px/1 system-ui, sans-serif;
+      cursor: pointer;
+      opacity: 0.75;
+      transition: opacity 0.2s, background 0.2s;
+      -webkit-backdrop-filter: blur(4px);
+      backdrop-filter: blur(4px);
+    }
+
+    #som:hover,
+    #som:focus-visible {
+      opacity: 1;
+      background: rgba(60, 0, 0, 0.7);
+    }
+
+    #som.bloqueado {
+      animation: chamar 1.6s ease-in-out infinite;
+    }
+
+    @keyframes chamar {
+      50% { opacity: 1; box-shadow: 0 0 14px rgba(255, 40, 30, 0.45); }
+    }
+
     #aviso.visivel {
       display: flex;
     }
@@ -88,6 +121,7 @@
 </head>
 <body>
   <div id="app"></div>
+  <button id="som" type="button" class="bloqueado" aria-pressed="false">🔊 Mudar Som / Unmute</button>
   <div id="aviso">
     <p>
       Imagem não encontrada em <code>assets/zumbi-de-sangue.png</code>.<br />
@@ -109,7 +143,11 @@
       suavizacao: 40,   // faixa extra usada para suavizar a borda do recorte
       tamanhoMax: 2048, // lado máximo da textura, em pixels
       alturaPlano: 3.2, // altura do zumbi na cena, em unidades do Three.js
-      zFinal: 0.6       // posição final do zumbi em direção à câmera
+      zFinal: 0.6,      // posição final do zumbi em direção à câmera
+      volume: 0.8,      // volume geral da trilha (0–1)
+      // Trilha extra opcional (ex.: um MP3 royalty-free seu em assets/). Ela toca por baixo
+      // da trilha sintetizada e reinicia a cada ciclo. Deixe vazio para usar só a sintetizada.
+      trilhaExterna: ''
     };
 
     const container = document.getElementById('app');
@@ -137,7 +175,8 @@
       brilho: 0,    // brilho vermelho geral (nevoeiro, poça, luz)
       tremor: 0,    // intensidade do camera shake
       vida: 0,      // liga a respiração/oscilação/pulsação do zumbi
-      flash: 0      // clarão vermelho no zumbi no momento do impacto
+      flash: 0,     // clarão vermelho no zumbi no momento do impacto
+      particulas: 0 // visibilidade das partículas de sangue e da luz pulsante
     };
 
     const chao = new THREE.Mesh(
@@ -238,6 +277,110 @@
     const luzContra = new THREE.DirectionalLight(0x801010, 0.6);
     luzContra.position.set(0, 4, -6);
     scene.add(luzContra);
+
+    // Luz pontual vermelha que pulsa no ritmo da bateria durante a pose
+    const luzPulsante = new THREE.PointLight(0xff1a0a, 0, 10, 1.6);
+    luzPulsante.position.set(0, 2.4, CONFIG.zFinal + 1.4);
+    scene.add(luzPulsante);
+
+    // ---------------------------------------------------------------
+    // Partículas de sangue: gotas brilhantes subindo da poça em espiral,
+    // com uma explosão no impacto
+    // ---------------------------------------------------------------
+    const NUM_PARTICULAS = Math.min(window.innerWidth, window.innerHeight) < 700 ? 260 : 450;
+    const posicoes = new Float32Array(NUM_PARTICULAS * 3);
+    const coresP = new Float32Array(NUM_PARTICULAS * 3);
+    const velocidades = new Float32Array(NUM_PARTICULAS * 3);
+    const idadeP = new Float32Array(NUM_PARTICULAS);
+    const duracaoP = new Float32Array(NUM_PARTICULAS);
+
+    const texGota = (() => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const ctx = c.getContext('2d');
+      const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      g.addColorStop(0, 'rgba(255,255,255,1)');
+      g.addColorStop(0.35, 'rgba(255,255,255,0.8)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 64, 64);
+      return new THREE.CanvasTexture(c);
+    })();
+
+    const geoParticulas = new THREE.BufferGeometry();
+    geoParticulas.setAttribute('position', new THREE.BufferAttribute(posicoes, 3));
+    geoParticulas.setAttribute('color', new THREE.BufferAttribute(coresP, 3));
+
+    const particulas = new THREE.Points(geoParticulas, new THREE.PointsMaterial({
+      size: 0.075,
+      map: texGota,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending // cor preta = invisível, então a cor também faz o fade
+    }));
+    particulas.renderOrder = 2;
+    particulas.frustumCulled = false;
+    scene.add(particulas);
+
+    function nascerParticula(i, explosao) {
+      const ang = Math.random() * Math.PI * 2;
+      const raio = explosao ? Math.random() * 0.7 : 0.3 + Math.random() * 1.5;
+      const j = i * 3;
+      posicoes[j] = Math.cos(ang) * raio;
+      posicoes[j + 1] = 0.03;
+      posicoes[j + 2] = CONFIG.zFinal + Math.sin(ang) * raio * 0.7;
+
+      if (explosao) {
+        velocidades[j] = Math.cos(ang) * (1.2 + Math.random() * 2.6);
+        velocidades[j + 1] = 1.8 + Math.random() * 3.2;
+        velocidades[j + 2] = Math.sin(ang) * (0.8 + Math.random() * 2) + 0.6;
+        duracaoP[i] = 0.9 + Math.random() * 1.1;
+      } else {
+        velocidades[j] = (Math.random() - 0.5) * 0.3;
+        velocidades[j + 1] = 0.45 + Math.random() * 1.1;
+        velocidades[j + 2] = (Math.random() - 0.5) * 0.3;
+        duracaoP[i] = 2 + Math.random() * 2.5;
+      }
+      idadeP[i] = explosao ? 0 : -Math.random() * duracaoP[i]; // espalha os nascimentos no tempo
+    }
+
+    function explodirParticulas() {
+      for (let i = 0; i < NUM_PARTICULAS; i++) nascerParticula(i, i % 3 !== 0);
+    }
+
+    function atualizarParticulas(dt, tempo) {
+      for (let i = 0; i < NUM_PARTICULAS; i++) {
+        const j = i * 3;
+        idadeP[i] += dt;
+        if (idadeP[i] < 0) {
+          coresP[j] = coresP[j + 1] = coresP[j + 2] = 0;
+          continue;
+        }
+        if (idadeP[i] >= duracaoP[i] || posicoes[j + 1] < 0) {
+          nascerParticula(i, false);
+          continue;
+        }
+
+        velocidades[j + 1] -= 0.55 * dt; // gravidade leve: as gotas sobem, freiam e caem
+        // Redemoinho em torno do zumbi
+        const dx = posicoes[j];
+        const dz = posicoes[j + 2] - CONFIG.zFinal;
+        posicoes[j] += (velocidades[j] - dz * 0.35 + Math.sin(tempo * 2 + i) * 0.12) * dt;
+        posicoes[j + 1] += velocidades[j + 1] * dt;
+        posicoes[j + 2] += (velocidades[j + 2] + dx * 0.35) * dt;
+
+        const f = Math.sin(Math.PI * (idadeP[i] / duracaoP[i]));
+        coresP[j] = f;
+        coresP[j + 1] = 0.07 * f;
+        coresP[j + 2] = 0.04 * f;
+      }
+      geoParticulas.attributes.position.needsUpdate = true;
+      geoParticulas.attributes.color.needsUpdate = true;
+    }
+
+    for (let i = 0; i < NUM_PARTICULAS; i++) nascerParticula(i, false);
 
     // Nevoeiro em camadas: sprites suaves vermelhos rente ao chão
     const texNevoa = (() => {
@@ -443,6 +586,358 @@
 
 
     // ---------------------------------------------------------------
+    // Trilha sonora sintetizada (Web Audio API): heavy metal / dark synthwave
+    // Gerada em tempo real e disparada pela timeline, por isso os drops caem
+    // exatamente aos 2 s (emergência) e aos 4 s (impacto) em todo ciclo.
+    // ---------------------------------------------------------------
+    const audio = (() => {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const vazio = { secao() {}, liberar: async () => {}, ligar() {}, liberado: () => false, tocando: () => false, aoMudarEstado() {} };
+      if (!AC) return vazio;
+
+      const ctx = new AC();
+      const mestre = ctx.createGain();
+      mestre.gain.value = 0;
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = -16;
+      compressor.ratio.value = 6;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
+      mestre.connect(compressor).connect(ctx.destination);
+
+      let ligado = false;
+
+      // Ruído branco reutilizado por bateria, pratos e risers
+      const ruido = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+      const dadosRuido = ruido.getChannelData(0);
+      for (let i = 0; i < dadosRuido.length; i++) dadosRuido[i] = Math.random() * 2 - 1;
+
+      // Curva de distorção da guitarra
+      const curva = new Float32Array(2048);
+      for (let i = 0; i < curva.length; i++) {
+        const x = (i / (curva.length - 1)) * 2 - 1;
+        curva[i] = Math.tanh(x * 9);
+      }
+
+      // Cada ciclo toca num "bus" próprio, que é silenciado quando o loop reinicia
+      let bus = null;
+      let guitarra = null;
+
+      function novoBus() {
+        if (bus) {
+          const velho = bus;
+          velho.gain.setTargetAtTime(0, ctx.currentTime, 0.04);
+          setTimeout(() => velho.disconnect(), 800);
+        }
+        bus = ctx.createGain();
+        bus.connect(mestre);
+
+        // Cadeia da guitarra: drive → distorção → corte de graves/agudos → "scoop" nos médios
+        const drive = ctx.createGain();
+        drive.gain.value = 5;
+        const shaper = ctx.createWaveShaper();
+        shaper.curve = curva;
+        shaper.oversample = '4x';
+        const hp = filtro('highpass', 85);
+        const medio = filtro('peaking', 750, 1, -7);
+        const lp = filtro('lowpass', 3600);
+        const saida = ctx.createGain();
+        saida.gain.value = 0.32;
+        drive.connect(shaper).connect(hp).connect(medio).connect(lp).connect(saida).connect(bus);
+        guitarra = drive;
+      }
+
+      function filtro(tipo, freq, q = 1, ganho = 0) {
+        const f = ctx.createBiquadFilter();
+        f.type = tipo;
+        f.frequency.value = freq;
+        f.Q.value = q;
+        f.gain.value = ganho;
+        return f;
+      }
+
+      function envelope(t, pico, decaimento, ataque = 0.003) {
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(pico, t + ataque);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + ataque + decaimento);
+        return g;
+      }
+
+      function fonteRuido(t, dur) {
+        const src = ctx.createBufferSource();
+        src.buffer = ruido;
+        src.loop = true;
+        src.start(t, Math.random() * 1.5);
+        src.stop(t + dur + 0.05);
+        return src;
+      }
+
+      // --- Instrumentos -------------------------------------------------
+      const E = 82.41, C = 65.41, A = 110, B = 123.47;
+
+      // Power chord distorcido (tônica + quinta + oitava); "abafado" = palm mute
+      function acorde(t, raiz, dur, vol = 0.5, abafado = false) {
+        const notas = abafado ? [raiz, raiz * 1.5] : [raiz, raiz * 1.5, raiz * 2];
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol, t + 0.006);
+        g.gain.setValueAtTime(vol, t + dur * 0.7);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        let destino = guitarra;
+        if (abafado) {
+          const lp = filtro('lowpass', 520);
+          lp.connect(guitarra);
+          destino = lp;
+        }
+        g.connect(destino);
+        for (const f of notas) {
+          for (const desafino of [-8, 8]) {
+            const o = ctx.createOscillator();
+            o.type = 'sawtooth';
+            o.frequency.value = f;
+            o.detune.value = desafino;
+            o.connect(g);
+            o.start(t);
+            o.stop(t + dur + 0.05);
+          }
+        }
+      }
+
+      function bumbo(t, vol = 1, f0 = 150) {
+        const o = ctx.createOscillator();
+        o.frequency.setValueAtTime(f0, t);
+        o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+        const g = envelope(t, vol, 0.35);
+        o.connect(g).connect(bus);
+        o.start(t);
+        o.stop(t + 0.45);
+      }
+
+      function caixa(t, vol = 0.6) {
+        const n = fonteRuido(t, 0.25);
+        const g = envelope(t, vol, 0.18);
+        n.connect(filtro('highpass', 1300)).connect(g).connect(bus);
+        const o = ctx.createOscillator();
+        o.type = 'triangle';
+        o.frequency.value = 190;
+        const go = envelope(t, vol * 0.6, 0.09);
+        o.connect(go).connect(bus);
+        o.start(t);
+        o.stop(t + 0.15);
+      }
+
+      function prato(t, vol = 0.4, dur = 1.8) {
+        const n = fonteRuido(t, dur);
+        const g = envelope(t, vol, dur, 0.002);
+        n.connect(filtro('highpass', 5500)).connect(g).connect(bus);
+      }
+
+      // Estrondo grave (sub) para os drops
+      function estrondo(t, vol = 1, dur = 1.5) {
+        const o = ctx.createOscillator();
+        o.frequency.setValueAtTime(62, t);
+        o.frequency.exponentialRampToValueAtTime(26, t + dur);
+        const g = envelope(t, vol, dur, 0.005);
+        o.connect(g).connect(bus);
+        o.start(t);
+        o.stop(t + dur + 0.05);
+      }
+
+      // Ruído subindo de frequência que "puxa" para o drop
+      function riser(t, dur, vol = 0.25) {
+        const n = fonteRuido(t, dur);
+        const bp = filtro('bandpass', 250, 3);
+        bp.frequency.setValueAtTime(250, t);
+        bp.frequency.exponentialRampToValueAtTime(6000, t + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol, t + dur * 0.97);
+        g.gain.linearRampToValueAtTime(0, t + dur);
+        n.connect(bp).connect(g).connect(bus);
+      }
+
+      // Drone sombrio de synth que abre o filtro aos poucos
+      function drone(t, dur) {
+        const lp = filtro('lowpass', 110, 6);
+        lp.frequency.setValueAtTime(110, t);
+        lp.frequency.exponentialRampToValueAtTime(700, t + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.32, t + dur * 0.8);
+        g.gain.linearRampToValueAtTime(0, t + dur);
+        lp.connect(g).connect(bus);
+        for (const f of [41.2, 41.45, 82.6]) {
+          const o = ctx.createOscillator();
+          o.type = 'sawtooth';
+          o.frequency.value = f;
+          o.connect(lp);
+          o.start(t);
+          o.stop(t + dur + 0.05);
+        }
+      }
+
+      // Baixo synthwave: notas curtas com filtro
+      function baixo(t, f, dur = 0.2, vol = 0.35) {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.value = f;
+        const lp = filtro('lowpass', 380, 4);
+        const g = envelope(t, vol, dur);
+        o.connect(lp).connect(g).connect(bus);
+        o.start(t);
+        o.stop(t + dur + 0.05);
+      }
+
+      // Pad sombrio (acorde menor sustentado)
+      function pad(t, freqs, dur, vol = 0.07) {
+        const lp = filtro('lowpass', 1100);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol, t + 0.5);
+        g.gain.setValueAtTime(vol, t + dur - 0.3);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        lp.connect(g).connect(bus);
+        for (const f of freqs) {
+          for (const desafino of [-12, 12]) {
+            const o = ctx.createOscillator();
+            o.type = 'sawtooth';
+            o.frequency.value = f;
+            o.detune.value = desafino;
+            o.connect(lp);
+            o.start(t);
+            o.stop(t + dur + 0.05);
+          }
+        }
+      }
+
+      // Arpejo synthwave agudo
+      function arpejo(t, f, vol = 0.045) {
+        const o = ctx.createOscillator();
+        o.type = 'square';
+        o.frequency.value = f;
+        const g = envelope(t, vol, 0.11);
+        o.connect(filtro('lowpass', 2400)).connect(g).connect(bus);
+        o.start(t);
+        o.stop(t + 0.15);
+      }
+
+      // --- Seções sincronizadas com a timeline --------------------------
+      // Progressão (um compasso = 2 s): Em – C – Am – B
+      const progressao = [
+        { raiz: E, pad: [164.81, 196, 246.94] },
+        { raiz: C, pad: [130.81, 164.81, 196] },
+        { raiz: A, pad: [110, 130.81, 164.81] },
+        { raiz: B, pad: [123.47, 155.56, 185] }
+      ];
+
+      const secoes = {
+        // 0–2 s: drone, batidas de coração e riser preparando o drop
+        0(t) {
+          drone(t, 2.02);
+          [0.15, 0.38, 0.95, 1.18, 1.55, 1.72].forEach((d, i) => bumbo(t + d, 0.45 + i * 0.05, 95));
+          riser(t + 0.7, 1.3, 0.22);
+        },
+
+        // 2 s: DROP — o zumbi começa a emergir
+        2(t) {
+          acorde(t, E, 0.95, 0.75);
+          bumbo(t, 1.2);
+          estrondo(t, 0.9, 1.0);
+          prato(t, 0.45, 1.6);
+          // chugs acelerando até o impacto
+          [1.0, 1.25, 1.5, 1.625, 1.75, 1.875].forEach((d) => {
+            acorde(t + d, E, 0.11, 0.6, true);
+            bumbo(t + d, 0.8);
+          });
+          for (let i = 0; i < 8; i++) caixa(t + 1.5 + i * 0.0625, 0.18 + i * 0.05); // virada na caixa
+          riser(t + 0.6, 1.4, 0.28);
+        },
+
+        // 4 s: IMPACTO + 15 s de groove pesado (bumbo a cada 0,5 s)
+        4(t) {
+          acorde(t, E, 1.6, 0.9);
+          acorde(t, E / 2, 1.2, 0.35);
+          bumbo(t, 1.4);
+          estrondo(t, 1.2, 1.6);
+          prato(t, 0.6, 2.4);
+          caixa(t, 1);
+
+          for (let k = 1; k < 30; k++) {
+            const tb = t + k * 0.5;
+            const compasso = Math.floor(k / 4);
+            const acordeAtual = progressao[compasso % 4];
+            const raiz = acordeAtual.raiz;
+
+            if (k >= 28) { // final do ciclo: acorde aberto ressoando
+              if (k === 28) {
+                acorde(tb, E, 0.95, 0.7);
+                bumbo(tb, 1.1);
+                prato(tb, 0.4, 1);
+              }
+              continue;
+            }
+
+            bumbo(tb, 0.95);
+            if (k % 4 === 3) bumbo(tb + 0.25, 0.7);
+            if (k % 4 === 2) caixa(tb, 0.75);
+
+            if (k >= 2) {
+              if (k % 4 === 0) {
+                acorde(tb, raiz, 0.45, 0.65);         // acorde aberto no início do compasso
+                if (k % 8 === 0) prato(tb, 0.25, 1.2);
+              } else {
+                acorde(tb, raiz, 0.12, 0.55, true);   // chug abafado
+              }
+              acorde(tb + 0.25, raiz, 0.12, 0.5, true);
+              baixo(tb, raiz / 2);
+              baixo(tb + 0.25, raiz / 2);
+            }
+
+            if (k % 4 === 0 && compasso >= 1 && compasso <= 6) pad(tb, acordeAtual.pad, 2);
+            if (compasso >= 2 && compasso <= 6) {
+              acordeAtual.pad.forEach((f, n) => arpejo(tb + n * 0.125, f * 4));
+              arpejo(tb + 0.375, acordeAtual.pad[1] * 4);
+            }
+          }
+        }
+      };
+
+      // Trilha externa opcional (toca por baixo e reinicia a cada ciclo)
+      let externo = null;
+      if (CONFIG.trilhaExterna) {
+        externo = new Audio(CONFIG.trilhaExterna);
+        externo.crossOrigin = 'anonymous';
+        const g = ctx.createGain();
+        g.gain.value = 0.5;
+        ctx.createMediaElementSource(externo).connect(g).connect(mestre);
+      }
+
+      return {
+        secao(n) {
+          if (ctx.state !== 'running') return;
+          if (n === 0 || !bus) novoBus();
+          if (n === 0 && externo) {
+            externo.currentTime = 0;
+            externo.play().catch(() => {});
+          }
+          secoes[n](ctx.currentTime + 0.01);
+        },
+        liberar: () => ctx.resume(),
+        ligar(sim) {
+          ligado = sim;
+          mestre.gain.setTargetAtTime(sim ? CONFIG.volume : 0, ctx.currentTime, 0.05);
+          if (externo && !sim) externo.pause();
+        },
+        liberado: () => ctx.state === 'running',
+        tocando: () => ligado && ctx.state === 'running',
+        aoMudarEstado(fn) {
+          ctx.addEventListener('statechange', fn);
+        }
+      };
+    })();
+
+    // ---------------------------------------------------------------
     // Mesh do Zumbi de Sangue
     // O plano tem várias subdivisões para que o shader possa deformar
     // regiões diferentes da imagem: tronco (respiração), cabeça
@@ -451,7 +946,8 @@
     const uniforms = {
       uTempo: { value: 0 },
       uVida: { value: 0 },
-      uFlash: { value: 0 }
+      uFlash: { value: 0 },
+      uLuz: { value: 0 }
     };
 
     // Só desenha o que estiver acima do chão (efeito de sair da poça)
@@ -529,6 +1025,7 @@
             uniform float uTempo;
             uniform float uVida;
             uniform float uFlash;
+            uniform float uLuz;
             varying float vAltura;`)
           .replace('#include <map_fragment>', `#include <map_fragment>
             // Pulsação: realça os tons vermelhos com uma onda que sobe pelo corpo
@@ -536,7 +1033,9 @@
             float onda = 0.5 + 0.5 * sin(uTempo * 3.2 - vAltura * 14.0);
             float batida = pow(0.5 + 0.5 * sin(uTempo * 2.6), 3.0);
             diffuseColor.rgb += vec3(1.0, 0.08, 0.05) * vermelho * (onda * 0.55 + batida * 0.6) * 0.55 * uVida;
-            diffuseColor.rgb += vec3(1.0, 0.12, 0.08) * uFlash * 0.35;`);
+            diffuseColor.rgb += vec3(1.0, 0.12, 0.08) * uFlash * 0.35;
+            // Luz pulsante vinda de cima/frente: mais forte na cabeça e no tronco
+            diffuseColor.rgb += diffuseColor.rgb * vec3(1.1, 0.12, 0.06) * uLuz * smoothstep(0.15, 0.9, vAltura) * 0.8;`);
       };
 
       zumbi = new THREE.Mesh(geometria, material);
@@ -564,7 +1063,8 @@
         .set(poca.scale, { x: 0.01, y: 0.01, z: 1 }, 0)
         .set(mat, { emissiveIntensity: 0 }, 0)
         .set(luzPoca, { intensity: 0 }, 0)
-        .set(estado, { brilho: 0, tremor: 0, vida: 0, flash: 0 }, 0);
+        .set(estado, { brilho: 0, tremor: 0, vida: 0, flash: 0, particulas: 0 }, 0)
+        .call(() => audio.secao(0), null, 0);
 
       // 1. [0–2 s] Preparação: a poça surge e começa a brilhar
       timeline
@@ -578,7 +1078,8 @@
         .to(zumbi.position, { y: 0, z: CONFIG.zFinal, duration: 2, ease: 'power1.in' }, 2)
         .to(zumbi.scale, { x: 1, y: 1, duration: 2, ease: 'power2.in' }, 2)
         .to(mat, { emissiveIntensity: 0.65, duration: 2 }, 2)
-        .to(luzPoca, { intensity: 16, duration: 2 }, 2);
+        .to(luzPoca, { intensity: 16, duration: 2 }, 2)
+        .call(() => audio.secao(2), null, 2); // drop de guitarra quando o zumbi começa a sair
 
       // 3. [4 s] Impacto: camera shake + explosão de brilho vermelho
       timeline
@@ -588,9 +1089,12 @@
         .fromTo(luzPoca, { intensity: 55 }, { intensity: 14, duration: 1.4, ease: 'power2.out' }, 4)
         .fromTo(mat, { emissiveIntensity: 1.5 }, { emissiveIntensity: 0.6, duration: 1.4, ease: 'power2.out' }, 4)
         .fromTo(poca.scale, { x: 1.18, y: 1.18 }, { x: 1, y: 1, duration: 0.8, ease: 'power2.out' }, 4)
-        .fromTo(zumbi.scale, { x: 1.06, y: 0.93 }, { x: 1, y: 1, duration: 0.7, ease: 'elastic.out(1, 0.4)' }, 4);
+        .fromTo(zumbi.scale, { x: 1.06, y: 0.93 }, { x: 1, y: 1, duration: 0.7, ease: 'elastic.out(1, 0.4)' }, 4)
+        .call(() => { audio.secao(4); explodirParticulas(); }, null, 4) // drop pesado + respingo de sangue
+        .set(estado, { particulas: 1 }, 4);
 
-      // 4. [4–19 s] Pose ameaçadora: respiração, cabeça e veias (via shader)
+      // 4. [4–19 s] Pose ameaçadora: respiração, cabeça e veias (via shader),
+      //    luz pulsante e partículas de sangue (no loop de renderização)
       timeline
         .to(estado, { vida: 1, duration: 0.8, ease: 'power1.inOut' }, 4.3)
         .to({}, { duration: 15 }, 4); // garante os 15 s completos: ciclo termina em 19 s
@@ -622,6 +1126,34 @@
       usarArquivo(e.dataTransfer.files[0]);
     });
 
+    // ---------------------------------------------------------------
+    // Botão de som: libera o áudio em navegadores que bloqueiam autoplay
+    // ---------------------------------------------------------------
+    const botaoSom = document.getElementById('som');
+
+    function atualizarBotaoSom() {
+      const tocando = audio.tocando();
+      botaoSom.textContent = tocando ? '🔇 Silenciar / Mute' : '🔊 Mudar Som / Unmute';
+      botaoSom.setAttribute('aria-pressed', String(tocando));
+      botaoSom.classList.toggle('bloqueado', !audio.liberado());
+    }
+
+    botaoSom.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!audio.liberado()) {
+        await audio.liberar();
+        audio.ligar(true);
+        if (timeline) timeline.restart(); // recomeça para o som entrar sincronizado desde o início
+      } else {
+        audio.ligar(!audio.tocando());
+      }
+      atualizarBotaoSom();
+    });
+
+    audio.aoMudarEstado(atualizarBotaoSom);
+    if (audio.liberado()) audio.ligar(true); // navegador permitiu autoplay
+    atualizarBotaoSom();
+
     usarImagem(CONFIG.imagem).catch((erro) => {
       console.warn(erro.message);
       aviso.classList.add('visivel');
@@ -632,12 +1164,24 @@
     // ---------------------------------------------------------------
     const corAtual = new THREE.Color();
 
-    gsap.ticker.add((tempo) => {
+    gsap.ticker.add((tempo, deltaMs) => {
       const { brilho, tremor, vida } = estado;
+      const dt = Math.min(deltaMs / 1000, 0.05);
+
+      // Batida da trilha na pose: bumbo a cada 0,5 s a partir dos 4 s
+      const tPose = timeline ? timeline.time() - 4 : -1;
+      const batidaMusica = tPose >= 0 ? Math.exp(-(tPose % 0.5) * 7) : 0;
 
       uniforms.uTempo.value = tempo;
       uniforms.uVida.value = vida;
       uniforms.uFlash.value = estado.flash;
+      uniforms.uLuz.value = estado.particulas * (0.15 + batidaMusica * 0.85);
+
+      luzPulsante.intensity = estado.particulas * (5 + batidaMusica * 28);
+      luzPulsante.position.x = Math.sin(tempo * 0.7) * 0.6;
+
+      particulas.material.opacity = estado.particulas;
+      if (estado.particulas > 0) atualizarParticulas(dt, tempo);
 
       // Nevoeiro mais quente conforme o brilho vermelho
       corAtual.copy(corNevoeiro).lerp(corNevoeiroQuente, brilho);
