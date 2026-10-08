@@ -96,6 +96,7 @@
   </div>
   <input id="arquivo" type="file" accept="image/*" hidden />
 
+
   <script type="module">
     import * as THREE from 'three';
 
@@ -107,24 +108,181 @@
       tolerancia: 60,   // distância de cor (0–441) até onde um pixel conta como fundo
       suavizacao: 40,   // faixa extra usada para suavizar a borda do recorte
       tamanhoMax: 2048, // lado máximo da textura, em pixels
-      alturaPlano: 3.2  // altura do plano na cena, em unidades do Three.js
+      alturaPlano: 3.2, // altura do zumbi na cena, em unidades do Three.js
+      zFinal: 0.6       // posição final do zumbi em direção à câmera
     };
 
     const container = document.getElementById('app');
     const aviso = document.getElementById('aviso');
     const inputArquivo = document.getElementById('arquivo');
 
-    // Renderer com fundo transparente sobre o preto da página
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setClearColor(0x000000, 0);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // limita o custo em telas de alta densidade
+    renderer.localClippingEnabled = true; // esconde a parte do zumbi que ainda está "dentro" da poça
     container.appendChild(renderer.domElement);
 
-    // Cena e câmera
+    // ---------------------------------------------------------------
+    // Cena: chão escuro, nevoeiro vermelho, poça de sangue e luzes
+    // ---------------------------------------------------------------
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
 
-    // Ajusta tamanho e enquadramento para PC (paisagem) e celular (retrato)
+    const corNevoeiro = new THREE.Color(0x140203);
+    const corNevoeiroQuente = new THREE.Color(0x4a0606);
+    scene.fog = new THREE.FogExp2(corNevoeiro.clone(), 0.085);
+    scene.background = corNevoeiro.clone();
+
+    // Valores animados pela timeline e lidos no loop de renderização
+    const estado = {
+      brilho: 0,    // brilho vermelho geral (nevoeiro, poça, luz)
+      tremor: 0,    // intensidade do camera shake
+      vida: 0,      // liga a respiração/oscilação/pulsação do zumbi
+      flash: 0      // clarão vermelho no zumbi no momento do impacto
+    };
+
+    const chao = new THREE.Mesh(
+      new THREE.PlaneGeometry(80, 80),
+      new THREE.MeshStandardMaterial({ color: 0x120708, roughness: 0.92, metalness: 0.05 })
+    );
+    chao.rotation.x = -Math.PI / 2;
+    scene.add(chao);
+
+    // Textura da poça: mancha irregular gerada em canvas
+    function texturaPoca() {
+      const c = document.createElement('canvas');
+      c.width = c.height = 512;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, 512, 512);
+
+      let semente = 7;
+      const aleatorio = () => ((semente = (semente * 16807) % 2147483647) / 2147483647);
+
+      const mancha = (x, y, r) => {
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, '#fff');
+        g.addColorStop(0.65, '#fff');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      };
+
+      mancha(256, 256, 170);
+      for (let i = 0; i < 14; i++) {
+        const ang = aleatorio() * Math.PI * 2;
+        const dist = 90 + aleatorio() * 90;
+        mancha(256 + Math.cos(ang) * dist, 256 + Math.sin(ang) * dist, 30 + aleatorio() * 55);
+      }
+      // Respingos soltos
+      for (let i = 0; i < 10; i++) {
+        const ang = aleatorio() * Math.PI * 2;
+        const dist = 200 + aleatorio() * 40;
+        mancha(256 + Math.cos(ang) * dist, 256 + Math.sin(ang) * dist, 6 + aleatorio() * 10);
+      }
+
+      const forma = new THREE.CanvasTexture(c);
+
+      // Brilho: sangue mais escuro no miolo, mais vivo perto das bordas, com manchas
+      const cb = document.createElement('canvas');
+      cb.width = cb.height = 512;
+      const bctx = cb.getContext('2d');
+      bctx.drawImage(c, 0, 0);
+      bctx.globalCompositeOperation = 'multiply';
+      const miolo = bctx.createRadialGradient(256, 256, 0, 256, 256, 230);
+      miolo.addColorStop(0, '#555');
+      miolo.addColorStop(0.6, '#bbb');
+      miolo.addColorStop(1, '#fff');
+      bctx.fillStyle = miolo;
+      bctx.fillRect(0, 0, 512, 512);
+      for (let i = 0; i < 40; i++) {
+        const x = 80 + aleatorio() * 352;
+        const y = 80 + aleatorio() * 352;
+        const r = 10 + aleatorio() * 40;
+        const g = bctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, 'rgba(60,60,60,0.8)');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        bctx.fillStyle = g;
+        bctx.fillRect(x - r, y - r, r * 2, r * 2);
+      }
+      const brilho = new THREE.CanvasTexture(cb);
+      brilho.colorSpace = THREE.SRGBColorSpace;
+
+      return { forma, brilho };
+    }
+
+    const texPoca = texturaPoca();
+    const poca = new THREE.Mesh(
+      new THREE.PlaneGeometry(4.2, 4.2),
+      new THREE.MeshStandardMaterial({
+        color: 0x2a0000,
+        emissive: 0xc00a04,
+        emissiveMap: texPoca.brilho,
+        emissiveIntensity: 0,
+        alphaMap: texPoca.forma,
+        transparent: true,
+        depthWrite: false,
+        roughness: 0.3,
+        metalness: 0.3
+      })
+    );
+    poca.rotation.x = -Math.PI / 2;
+    poca.position.set(0, 0.01, CONFIG.zFinal);
+    scene.add(poca);
+
+    scene.add(new THREE.AmbientLight(0x3a0a0a, 0.8));
+    const luzPoca = new THREE.PointLight(0xff2010, 0, 9, 2);
+    luzPoca.position.set(0, 0.5, CONFIG.zFinal + 0.6);
+    scene.add(luzPoca);
+    const luzContra = new THREE.DirectionalLight(0x801010, 0.6);
+    luzContra.position.set(0, 4, -6);
+    scene.add(luzContra);
+
+    // Nevoeiro em camadas: sprites suaves vermelhos rente ao chão
+    const texNevoa = (() => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const ctx = c.getContext('2d');
+      const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+      g.addColorStop(0, 'rgba(255,255,255,1)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 128, 128);
+      return new THREE.CanvasTexture(c);
+    })();
+
+    const nevoas = [];
+    for (let i = 0; i < 9; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: texNevoa,
+        color: 0x8a0c0c,
+        transparent: true,
+        opacity: 0.16,
+        depthWrite: false,
+        depthTest: false // não é cortado pelo chão: a névoa cobre o piso suavemente
+      }));
+      s.renderOrder = -1;
+      const escala = 4 + (i % 3) * 1.6;
+      s.scale.set(escala * 1.6, escala * 0.55, 1);
+      s.userData = {
+        x: -6 + (i / 8) * 12,
+        y: 0.25 + (i % 4) * 0.25,
+        z: -4.5 + (i % 3) * 1.6,
+        fase: i * 1.7,
+        vel: 0.12 + (i % 4) * 0.05
+      };
+      scene.add(s);
+      nevoas.push(s);
+    }
+
+    // ---------------------------------------------------------------
+    // Câmera: enquadra o zumbi na posição final, em paisagem ou retrato
+    // ---------------------------------------------------------------
+    const dimZumbi = { largura: 2.1, altura: CONFIG.alturaPlano };
+    const camBase = new THREE.Vector3();
+    const alvoBase = new THREE.Vector3();
+
     function resize() {
       const width = container.clientWidth;
       const height = container.clientHeight;
@@ -132,10 +290,16 @@
 
       renderer.setSize(width, height, false);
       camera.aspect = aspect;
-
-      // Em telas verticais, afasta a câmera para o conteúdo caber na largura
-      camera.position.z = aspect < 1 ? 5 / aspect : 5;
       camera.updateProjectionMatrix();
+
+      const tanMeio = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+      const distAltura = (dimZumbi.altura / 2 + 0.75) / tanMeio;
+      const distLargura = (dimZumbi.largura / 2 + 0.45) / (tanMeio * aspect);
+      const dist = Math.max(distAltura, distLargura);
+
+      const centroY = dimZumbi.altura * 0.48;
+      alvoBase.set(0, centroY, CONFIG.zFinal);
+      camBase.set(0, centroY + dist * 0.12, CONFIG.zFinal + dist);
     }
 
     window.addEventListener('resize', resize);
@@ -277,14 +441,27 @@
       return saida;
     }
 
+
     // ---------------------------------------------------------------
     // Mesh do Zumbi de Sangue
+    // O plano tem várias subdivisões para que o shader possa deformar
+    // regiões diferentes da imagem: tronco (respiração), cabeça
+    // (oscilação lateral) e cor (pulsação das veias).
     // ---------------------------------------------------------------
+    const uniforms = {
+      uTempo: { value: 0 },
+      uVida: { value: 0 },
+      uFlash: { value: 0 }
+    };
+
+    // Só desenha o que estiver acima do chão (efeito de sair da poça)
+    const planoChao = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
     let zumbi = null;
+    let timeline = null;
 
     function criarZumbi(canvasRecortado) {
       if (zumbi) {
-        gsap.killTweensOf([zumbi.position, zumbi.scale, zumbi.material]);
         scene.remove(zumbi);
         zumbi.geometry.dispose();
         zumbi.material.map.dispose();
@@ -302,25 +479,126 @@
         largura = 4.2;
         altura = largura / proporcao;
       }
+      dimZumbi.largura = largura;
+      dimZumbi.altura = altura;
+      resize();
+
+      const geometria = new THREE.PlaneGeometry(largura, altura, 24, 48);
+      geometria.translate(0, altura / 2, 0); // origem nos pés
 
       const material = new THREE.MeshBasicMaterial({
         map: textura,
         transparent: true,
-        alphaTest: 0.01,
+        alphaTest: 0.02,
         depthWrite: false,
-        side: THREE.DoubleSide
+        side: THREE.DoubleSide,
+        clippingPlanes: [planoChao]
       });
 
-      zumbi = new THREE.Mesh(new THREE.PlaneGeometry(largura, altura), material);
+      material.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, uniforms);
+
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', `#include <common>
+            uniform float uTempo;
+            uniform float uVida;
+            varying float vAltura;`)
+          .replace('#include <begin_vertex>', `#include <begin_vertex>
+            float yN = uv.y;
+            vAltura = yN;
+
+            // Respiração: o tronco sobe/desce e o peito expande
+            float resp = sin(uTempo * 2.4) * 0.6 + sin(uTempo * 1.2) * 0.4;
+            float tronco = smoothstep(0.30, 0.70, yN);
+            transformed.y += resp * 0.045 * tronco * uVida;
+            float peito = smoothstep(0.38, 0.55, yN) * (1.0 - smoothstep(0.62, 0.74, yN));
+            transformed.x *= 1.0 + resp * 0.03 * peito * uVida;
+
+            // Oscilação lateral da cabeça (dobrando no pescoço)
+            float cabeca = smoothstep(0.58, 0.85, yN);
+            float balanco = sin(uTempo * 0.9) * 0.7 + sin(uTempo * 2.1 + 1.3) * 0.3;
+            transformed.x += balanco * 0.09 * cabeca * uVida;
+            transformed.y -= abs(balanco) * 0.015 * cabeca * uVida;
+
+            // Leve contração dos braços/garras
+            float lados = smoothstep(0.25, 0.48, abs(uv.x - 0.5)) * (1.0 - smoothstep(0.25, 0.55, yN));
+            transformed.x += sin(uTempo * 1.7 + uv.x * 3.0) * 0.025 * lados * uVida;`);
+
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>', `#include <common>
+            uniform float uTempo;
+            uniform float uVida;
+            uniform float uFlash;
+            varying float vAltura;`)
+          .replace('#include <map_fragment>', `#include <map_fragment>
+            // Pulsação: realça os tons vermelhos com uma onda que sobe pelo corpo
+            float vermelho = clamp(diffuseColor.r - max(diffuseColor.g, diffuseColor.b), 0.0, 1.0);
+            float onda = 0.5 + 0.5 * sin(uTempo * 3.2 - vAltura * 14.0);
+            float batida = pow(0.5 + 0.5 * sin(uTempo * 2.6), 3.0);
+            diffuseColor.rgb += vec3(1.0, 0.08, 0.05) * vermelho * (onda * 0.55 + batida * 0.6) * 0.55 * uVida;
+            diffuseColor.rgb += vec3(1.0, 0.12, 0.08) * uFlash * 0.35;`);
+      };
+
+      zumbi = new THREE.Mesh(geometria, material);
+      zumbi.position.set(0, -altura * 0.56, CONFIG.zFinal - 0.8);
+      zumbi.renderOrder = 1; // desenha depois da poça e do nevoeiro
       scene.add(zumbi);
 
-      // Entrada e flutuação com GSAP
-      material.opacity = 0;
-      gsap.to(material, { opacity: 1, duration: 1.2, ease: 'power2.out' });
-      gsap.from(zumbi.scale, { x: 0.6, y: 0.6, duration: 1.4, ease: 'back.out(1.7)' });
-      gsap.to(zumbi.position, { y: 0.12, duration: 2.4, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+      montarTimeline();
     }
 
+    // ---------------------------------------------------------------
+    // Timeline principal (19 s, repete para sempre como um vídeo)
+    // ---------------------------------------------------------------
+    function montarTimeline() {
+      if (timeline) timeline.kill();
+      const altura = dimZumbi.altura;
+      const mat = poca.material;
+
+      timeline = gsap.timeline({ repeat: -1, defaults: { ease: 'none' } });
+
+      // Estado inicial de cada ciclo
+      timeline
+        .set(zumbi.position, { x: 0, y: -altura * 0.56, z: CONFIG.zFinal - 0.8 }, 0) // começa todo abaixo do chão
+        .set(zumbi.scale, { x: 0.55, y: 0.55, z: 1 }, 0)
+        .set(poca.scale, { x: 0.01, y: 0.01, z: 1 }, 0)
+        .set(mat, { emissiveIntensity: 0 }, 0)
+        .set(luzPoca, { intensity: 0 }, 0)
+        .set(estado, { brilho: 0, tremor: 0, vida: 0, flash: 0 }, 0);
+
+      // 1. [0–2 s] Preparação: a poça surge e começa a brilhar
+      timeline
+        .to(poca.scale, { x: 1, y: 1, duration: 2, ease: 'power2.out' }, 0)
+        .to(mat, { emissiveIntensity: 0.45, duration: 2, ease: 'power1.in' }, 0)
+        .to(luzPoca, { intensity: 10, duration: 2, ease: 'power1.in' }, 0)
+        .to(estado, { brilho: 0.25, duration: 2 }, 0);
+
+      // 2. [2–4 s] Emergência: sobe rápido da poça, crescendo em direção à câmera
+      timeline
+        .to(zumbi.position, { y: 0, z: CONFIG.zFinal, duration: 2, ease: 'power1.in' }, 2)
+        .to(zumbi.scale, { x: 1, y: 1, duration: 2, ease: 'power2.in' }, 2)
+        .to(mat, { emissiveIntensity: 0.65, duration: 2 }, 2)
+        .to(luzPoca, { intensity: 16, duration: 2 }, 2);
+
+      // 3. [4 s] Impacto: camera shake + explosão de brilho vermelho
+      timeline
+        .fromTo(estado, { tremor: 1 }, { tremor: 0, duration: 1.2, ease: 'power2.out' }, 4)
+        .fromTo(estado, { flash: 1 }, { flash: 0, duration: 0.9, ease: 'power2.out' }, 4)
+        .fromTo(estado, { brilho: 1 }, { brilho: 0.35, duration: 1.6, ease: 'power2.out' }, 4)
+        .fromTo(luzPoca, { intensity: 55 }, { intensity: 14, duration: 1.4, ease: 'power2.out' }, 4)
+        .fromTo(mat, { emissiveIntensity: 1.5 }, { emissiveIntensity: 0.6, duration: 1.4, ease: 'power2.out' }, 4)
+        .fromTo(poca.scale, { x: 1.18, y: 1.18 }, { x: 1, y: 1, duration: 0.8, ease: 'power2.out' }, 4)
+        .fromTo(zumbi.scale, { x: 1.06, y: 0.93 }, { x: 1, y: 1, duration: 0.7, ease: 'elastic.out(1, 0.4)' }, 4);
+
+      // 4. [4–19 s] Pose ameaçadora: respiração, cabeça e veias (via shader)
+      timeline
+        .to(estado, { vida: 1, duration: 0.8, ease: 'power1.inOut' }, 4.3)
+        .to({}, { duration: 15 }, 4); // garante os 15 s completos: ciclo termina em 19 s
+    }
+
+    // ---------------------------------------------------------------
+    // Carregamento da imagem (arquivo do projeto ou escolhido pelo usuário)
+    // ---------------------------------------------------------------
     async function usarImagem(url) {
       const img = await carregarImagem(url);
       criarZumbi(recortarFundo(img));
@@ -349,8 +627,57 @@
       aviso.classList.add('visivel');
     });
 
+    // ---------------------------------------------------------------
     // Loop de renderização sincronizado com o ticker do GSAP
-    gsap.ticker.add(() => renderer.render(scene, camera));
+    // ---------------------------------------------------------------
+    const corAtual = new THREE.Color();
+
+    gsap.ticker.add((tempo) => {
+      const { brilho, tremor, vida } = estado;
+
+      uniforms.uTempo.value = tempo;
+      uniforms.uVida.value = vida;
+      uniforms.uFlash.value = estado.flash;
+
+      // Nevoeiro mais quente conforme o brilho vermelho
+      corAtual.copy(corNevoeiro).lerp(corNevoeiroQuente, brilho);
+      scene.fog.color.copy(corAtual);
+      scene.background.copy(corAtual);
+
+      // Poça e luz pulsando junto com o corpo durante a pose
+      const batida = Math.pow(0.5 + 0.5 * Math.sin(tempo * 2.6), 3);
+      luzPoca.position.y = 0.5 + batida * 0.08 * vida;
+      const pulso = 1 + batida * 0.35 * vida + Math.sin(tempo * 17) * 0.03 * brilho;
+
+      for (const s of nevoas) {
+        const d = s.userData;
+        s.position.set(
+          d.x + Math.sin(tempo * d.vel + d.fase) * 1.2,
+          d.y + Math.sin(tempo * d.vel * 1.3 + d.fase) * 0.12,
+          d.z
+        );
+        s.material.opacity = 0.14 + brilho * 0.14;
+      }
+
+      // Câmera com trepidação no impacto
+      camera.position.copy(camBase);
+      camera.lookAt(alvoBase);
+      if (tremor > 0.001) {
+        const f = tremor * tremor;
+        camera.position.x += (Math.random() - 0.5) * 0.35 * f;
+        camera.position.y += (Math.random() - 0.5) * 0.35 * f;
+        camera.rotation.z += (Math.random() - 0.5) * 0.06 * f;
+      }
+
+      // O pulso multiplica os valores da timeline só durante o desenho do quadro
+      const luzBase = luzPoca.intensity;
+      const emissivoBase = poca.material.emissiveIntensity;
+      luzPoca.intensity = luzBase * pulso;
+      poca.material.emissiveIntensity = emissivoBase * pulso;
+      renderer.render(scene, camera);
+      luzPoca.intensity = luzBase;
+      poca.material.emissiveIntensity = emissivoBase;
+    });
   </script>
 </body>
 </html>
